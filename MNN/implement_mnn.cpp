@@ -54,9 +54,9 @@ std::vector<uint8_t> readIdx1(const std::string& filename) {
 // ============================
 
 int main() {
-    const std::string model_path = "/home/orangepi/Documents/Project/mnist_cnn.mnn";
-    const std::string image_path = "/home/orangepi/Documents/Project/t10k-images-idx3-ubyte";
-    const std::string label_path = "/home/orangepi/Documents/Project/t10k-labels-idx1-ubyte";
+    const std::string model_path = "/home/orangepi/Documents/Project/MNN/mnist_cnn.mnn";
+    const std::string image_path = "/home/orangepi/Documents/Project/MNN/t10k-images-idx3-ubyte";
+    const std::string label_path = "/home/orangepi/Documents/Project/MNN/t10k-labels-idx1-ubyte";
 
     // Load MNIST data
     auto images = readIdx3(image_path);
@@ -67,12 +67,13 @@ int main() {
 
     ScheduleConfig config;
     config.type = MNN_FORWARD_OPENCL;
-    config.numThread = 4; // adjust if needed
+    config.numThread = 1; // adjust if needed
 	//config.openCLRuntimeDebug = true;
 
     BackendConfig backendConfig;
-    backendConfig.precision = BackendConfig::Precision_High;
+    backendConfig.precision = BackendConfig::Precision_Normal;
     config.backendConfig = &backendConfig;
+   
 
     auto session = net->createSession(config);
     auto inputTensor = net->getSessionInput(session, nullptr);
@@ -84,12 +85,15 @@ int main() {
     Tensor inputHost(inputTensor, inputTensor->getDimensionType());
 
     int correct = 0;
-    int num_tests = 50; // test 10 samples
+    int num_tests = 10; // test 10 samples
 
     for (int i = 0; i < num_tests; ++i) {
         // Normalize image (0-1 range)
         for (int j = 0; j < img_h * img_w; ++j) {
-            inputHost.host<float>()[j] = images[i * img_h * img_w + j] / 255.0f;
+            float pixel = images[i * img_h * img_w + j] / 255.0f;
+            pixel =  (pixel - 0.1307f)/0.3081f;
+            inputHost.host<float>()[j] = pixel;
+            
         }
 
         // Copy data to device (MNN handles NCHW→NC4HW4)
@@ -109,8 +113,10 @@ int main() {
         // Find predicted label (argmax)
         float max_val = -1e9f;
         int predicted = -1;
+        /*cout<<"The RAW values of the output";*/ 
         for (int k = 0; k < outputHost.elementSize(); ++k) {
             float val = outputHost.host<float>()[k];
+            /*cout<< val;*/
             if (val > max_val) {
                 max_val = val;
                 predicted = k;
@@ -129,6 +135,7 @@ int main() {
 
     std::cout << "Accuracy on first " << num_tests << " samples: "
               << (float)correct / num_tests * 100.0f << "%" << std::endl;
+        
 
     return 0;
 }
