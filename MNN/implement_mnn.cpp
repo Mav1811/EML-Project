@@ -67,7 +67,7 @@ int main() {
 
     ScheduleConfig config;
     config.type = MNN_FORWARD_OPENCL;
-    config.numThread = 1; // adjust if needed
+    config.numThread = 4; // adjust if needed
 	//config.openCLRuntimeDebug = true;
 
     BackendConfig backendConfig;
