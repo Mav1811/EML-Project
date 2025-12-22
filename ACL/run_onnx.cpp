@@ -1,7 +1,6 @@
 #include <armnn/IRuntime.hpp>
 #include <armnnOnnxParser/IOnnxParser.hpp>
 #include <armnn/Logging.hpp>
-//#include <armnn/LoggingService.hpp>
 
 #include <iostream>
 #include <fstream>
@@ -9,148 +8,235 @@
 #include <algorithm>
 #include <memory>
 #include <cstdint>
+#include <chrono>
 
+// ========================
+// Configuration
+// ========================
+constexpr unsigned int batchSize = 1;
+constexpr unsigned int channels  = 1;
+constexpr unsigned int height    = 28;
+constexpr unsigned int width     = 28;
 
-const unsigned int batchSize = 32;
-const unsigned int channels  = 1;
-const unsigned int height    = 28;
-const unsigned int width     = 28;
+constexpr unsigned int numClasses = 10;
+constexpr unsigned int NUM_SAMPLES = 5032;
+constexpr unsigned int WARMUP_RUNS = 2;
 
-// Utility: read big-endian integer from MNIST files
+// ========================
+// MNIST utilities
+// ========================
 int32_t readInt(std::ifstream& f)
 {
     unsigned char bytes[4];
     f.read(reinterpret_cast<char*>(bytes), 4);
-    return (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+    return (bytes[0] << 24) |
+           (bytes[1] << 16) |
+           (bytes[2] << 8)  |
+           bytes[3];
 }
 
-// Load one MNIST image (28x28 = 784 bytes) normalized to [0,1]
-std::vector<float> loadMnistImage(std::ifstream& f, int index, int rows = 28, int cols = 28)
+std::vector<float> loadMnistImage(std::ifstream& f, int index, int rows, int cols)
 {
-    f.seekg(16 + index * rows * cols);  // skip header + previous images
+    f.seekg(16 + index * rows * cols);
     std::vector<unsigned char> buffer(rows * cols);
     f.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
 
     std::vector<float> img(buffer.size());
-    for (size_t i = 0; i < buffer.size(); i++)
-        img[i] = buffer[i] / 255.0f;   // normalize
+    for (size_t i = 0; i < buffer.size(); ++i)
+    {
+        float val = buffer[i] / 255.0f;
+        img[i] = (val - 0.1307f) / 0.3081f;
+    }
     return img;
 }
 
-// Load one MNIST label
 int loadMnistLabel(std::ifstream& f, int index)
 {
-    f.seekg(8 + index); // skip header + previous labels
+    f.seekg(8 + index);
     unsigned char label;
     f.read(reinterpret_cast<char*>(&label), 1);
-    return label;
+    return static_cast<int>(label);
 }
 
+// ========================
+// Main
+// ========================
 int main()
 {
     try
     {
-        // Paths to dataset files
-        std::string imageFile = "train-images-idx3-ubyte";
-        std::string labelFile = "train-labels-idx1-ubyte";
-        std::string modelFile = "mnist_cnn.onnx";
+        // ------------------------
+        // Files
+        // ------------------------
+        const std::string imageFile = "t10k-images-idx3-ubyte";
+        const std::string labelFile = "t10k-labels-idx1-ubyte";
+        const std::string modelFile = "/home/orangepi/Documents/Project/models/mnist_cnn_b1.onnx";
 
-        // Open dataset files
         std::ifstream imgStream(imageFile, std::ios::binary);
         std::ifstream lblStream(labelFile, std::ios::binary);
 
-        if (!imgStream.is_open() || !lblStream.is_open())
+        if (!imgStream || !lblStream)
         {
-            std::cerr << "Failed to open MNIST dataset files!" << std::endl;
+            std::cerr << "Failed to open MNIST files\n";
             return -1;
         }
 
-        // Read headers
-        int magicImages = readInt(imgStream);
-        int numImages = readInt(imgStream);
+        // ------------------------
+        // Read MNIST headers
+        // ------------------------
+        readInt(imgStream);                 // magic
+        int totalImages = readInt(imgStream);
         int rows = readInt(imgStream);
         int cols = readInt(imgStream);
 
-        int magicLabels = readInt(lblStream);
-        int numLabels = readInt(lblStream);
+        readInt(lblStream);                 // magic
+        readInt(lblStream);                 // num labels
 
-        std::cout << "Dataset contains " << numImages << " images, " << rows << "x" << cols << std::endl;
+        if (totalImages < NUM_SAMPLES)
+        {
+            std::cerr << "Not enough MNIST samples\n";
+            return -1;
+        }
 
-        // Select one image (e.g., index 0)
-        int index = 5;
-        std::vector<float> inputData = loadMnistImage(imgStream, index, rows, cols);
-        int trueLabel = loadMnistLabel(lblStream, index);
+        std::cout << "Loaded MNIST: " << rows << "x" << cols << "\n";
 
-        // 1. Parse ONNX model
-        //armnn::ConfigureLogging(/*printToStdOut*/ true,/*printToDebug*/ true,armnn::LogSeverity::off);
+        // ------------------------
+        // Preload MNIST (NO TIMING)
+        // ------------------------
+        std::vector<std::vector<float>> images(NUM_SAMPLES);
+        std::vector<int> labels(NUM_SAMPLES);
+
+        for (unsigned int i = 0; i < NUM_SAMPLES; ++i)
+        {
+            images[i] = loadMnistImage(imgStream, i, rows, cols);
+            labels[i] = loadMnistLabel(lblStream, i);
+        }
+
+        // ------------------------
+        // Load ONNX model
+        // ------------------------
         auto parser = armnnOnnxParser::IOnnxParser::Create();
-        auto network = parser->CreateNetworkFromBinaryFile("mnist_cnn.onnx");
+        auto network = parser->CreateNetworkFromBinaryFile(modelFile.c_str());
 
-        // 2. Create runtime
         armnn::IRuntime::CreationOptions options;
         armnn::IRuntimePtr runtime(armnn::IRuntime::Create(options));
 
-        // Optimize
-        //armnn::OptimizerOptions options;
-        //options.m_ReduceFp32ToFp16 = true;
-        armnn::IOptimizedNetworkPtr optNet = armnn::Optimize(
+
+        auto optNet = armnn::Optimize(
             *network,
-            {armnn::Compute:: CpuRef},  // try CpuAcc (NEON); fallback CpuRef
+            { armnn::Compute::CpuRef },
             runtime->GetDeviceSpec()
         );
 
         armnn::NetworkId networkId;
         runtime->LoadNetwork(networkId, std::move(optNet));
 
-        // 3. Setup input tensor
-		//auto inputInfo = runtime->GetInputTensorInfo(networkId, 0);
-		armnn::TensorInfo inputInfo({batchSize, channels, height, width}, armnn::DataType::Float32);
-		inputInfo.SetConstant(true);
-		std::cout << "Model expects input shape: ";
-		for (unsigned int i = 0; i < inputInfo.GetNumDimensions(); ++i)
-			std::cout << inputInfo.GetShape()[i] << " ";
-		std::cout << std::endl;
-
-		std::cout << "Model expects " << inputInfo.GetNumElements() << " elements" << std::endl;
-		std::cout << "Input data has " << inputData.size() << " elements" << std::endl;
-
-		std::vector<float> batchedInput;
-		batchedInput.reserve(32 * 784);
-
-		for (int i = 0; i < 32; ++i)
-			batchedInput.insert(batchedInput.end(), inputData.begin(), inputData.end());
-
-		std::cout << "Batched input data has " << batchedInput.size() << " elements" << std::endl;
-
-		// Create Tensor instead of ConstTensor
-		//std::vector<float> inputImage(inputInfo.GetNumElements(), 0.0f);
-		armnn::ConstTensor inputTensor(inputInfo, batchedInput.data());
-		armnn::InputTensors inputTensors{{0, inputTensor}};
-
-        //armnn::InputTensors inputTensors{
-            //{0, armnn::ConstTensor(runtime->GetInputTensorInfo(networkId, 0), inputData.data())}
-       // };
-
-        // 4. Setup output tensor (10 classes)
-        std::vector<float> outputData(10);
-        armnn::OutputTensors outputTensors{
-            {0, armnn::Tensor(runtime->GetOutputTensorInfo(networkId, 0), outputData.data())}
-        };
-
-        // 5. Run inference
-        runtime->EnqueueWorkload(networkId, inputTensors, outputTensors);
-
-        // 6. Get prediction
-        int predictedDigit = std::distance(
-            outputData.begin(),
-            std::max_element(outputData.begin(), outputData.end())
+        // ------------------------
+        // Tensor setup
+        // ------------------------
+        armnn::TensorInfo inputInfo(
+            { batchSize, channels, height, width },
+            armnn::DataType::Float32
         );
+        inputInfo.SetConstant(true);
 
-        std::cout << "True label: " << trueLabel << " | Predicted: " << predictedDigit << std::endl;
+
+        armnn::TensorInfo outputInfo(
+            { batchSize, numClasses },
+            armnn::DataType::Float32
+        );
+        outputInfo.SetConstant(true);
+
+        std::vector<float> batchedInput(batchSize * height * width);
+        std::vector<float> outputData(batchSize * numClasses);
+
+        armnn::Tensor inputTensor(inputInfo, batchedInput.data());
+        armnn::Tensor outputTensor(outputInfo, outputData.data());
+
+        armnn::InputTensors inputTensors{ {0, inputTensor} };
+        armnn::OutputTensors outputTensors{ {0, outputTensor} };
+
+        // ------------------------
+        // Benchmark loop
+        // ------------------------
+        using clock = std::chrono::high_resolution_clock;
+
+        double totalInferenceMs = 0.0;
+        unsigned int inferenceRuns = 0;
+
+        int correct = 0;
+        int total = 0;
+
+        for (unsigned int idx = 0;
+             idx + batchSize <= NUM_SAMPLES;
+             idx += batchSize)
+        {
+            // Fill batch
+            for (unsigned int b = 0; b < batchSize; ++b)
+            {
+                std::copy(
+                    images[idx + b].begin(),
+                    images[idx + b].end(),
+                    batchedInput.begin() + b * height * width
+                );
+            }
+
+            // Warm-up
+            if (inferenceRuns < WARMUP_RUNS)
+            {
+                std::cout<<"warmup dataset \n";
+                runtime->EnqueueWorkload(
+                    networkId, inputTensors, outputTensors);
+                inferenceRuns++;
+                continue;
+            
+            }
+
+            // Timed inference
+            auto t0 = clock::now();
+            runtime->EnqueueWorkload(
+                networkId, inputTensors, outputTensors);
+            auto t1 = clock::now();
+
+            totalInferenceMs +=
+                std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            inferenceRuns++;
+
+            // Accuracy
+            for (unsigned int b = 0; b < batchSize; ++b)
+            {
+                float* row = outputData.data() + b * numClasses;
+                int pred = std::max_element(row, row + numClasses) - row;
+                
+                if (pred == labels[idx + b]){
+                    correct++;}
+                else{
+                    std::cout<<"predicted value"<<pred<<"  "<<"label value"<<labels[idx + b]<<std::endl;}
+
+                total++;
+            }
+        }
+
+        // ------------------------
+        // Results
+        // ------------------------
+        unsigned int measuredRuns = inferenceRuns - WARMUP_RUNS;
+
+        std::cout << "\n==== BENCHMARK RESULTS ====\n";
+        std::cout << "Batch size              : " << batchSize << "\n";
+        std::cout << "Images processed        : " << total << "\n";
+        std::cout << "Avg batch inference time: "
+                  << (totalInferenceMs / measuredRuns) << " ms\n";
+        std::cout << "Per-image latency       : "
+                  << (totalInferenceMs / measuredRuns) / batchSize << " ms\n";
+        std::cout << "Accuracy                : "
+                  << (100.0 * correct / total) << " %\n";
+
     }
     catch (const std::exception& e)
     {
-        std::cerr << "Exception: " << e.what() << std::endl;
+        std::cerr << "Exception: " << e.what() << "\n";
         return -1;
     }
 

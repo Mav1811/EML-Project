@@ -54,20 +54,24 @@ std::vector<uint8_t> readIdx1(const std::string& filename) {
 // ============================
 
 int main() {
-    const std::string model_path = "/home/orangepi/Documents/Project/MNN/mnist_cnn.mnn";
-    const std::string image_path = "/home/orangepi/Documents/Project/MNN/t10k-images-idx3-ubyte";
-    const std::string label_path = "/home/orangepi/Documents/Project/MNN/t10k-labels-idx1-ubyte";
+    const std::string model_path_32 = "/home/orangepi/Documents/Project/models/mnist_cnn_b32.mnn";
+    const std::string model_path_16 = "/home/orangepi/Documents/Project/models/mnist_cnn_b16.mnn";
+    const std::string model_path_8 = "/home/orangepi/Documents/Project/models/mnist_cnn_b8.mnn";
+    const std::string model_path_1 = "/home/orangepi/Documents/Project/models/mnist_cnn_b1.mnn";
+    const std::string image_path = "/home/orangepi/Documents/data/MNIST/raw/t10k-images-idx3-ubyte";
+    const std::string label_path = "/home/orangepi/Documents/data/MNIST/raw/t10k-labels-idx1-ubyte";
 
     // Load MNIST data
     auto images = readIdx3(image_path);
     auto labels = readIdx1(label_path);
 
     // Create MNN interpreter and session
-    std::shared_ptr<Interpreter> net(Interpreter::createFromFile(model_path.c_str()));
+   
+    std::shared_ptr<Interpreter> net(Interpreter::createFromFile(model_path_1.c_str()));    
 
     ScheduleConfig config;
     config.type = MNN_FORWARD_OPENCL;
-    config.numThread = 4; // adjust if needed
+    config.numThread = 1; // adjust if needed
 	//config.openCLRuntimeDebug = true;
 
     BackendConfig backendConfig;
@@ -77,24 +81,48 @@ int main() {
 
     auto session = net->createSession(config);
     auto inputTensor = net->getSessionInput(session, nullptr);
+    auto inputshape = inputTensor->shape();
 
-    // Assume input is [1,1,28,28]
-    const int img_h = 28, img_w = 28;
+
 
     // Host tensor for input in NCHW
     Tensor inputHost(inputTensor, inputTensor->getDimensionType());
+    cout<<"the input tesor dimensions"<<inputTensor->getDimensionType()<<endl;
+    cout<<" The input tensor size"<<inputTensor->size()<<endl;
+    cout<<" The input tensor element size"<<inputTensor->elementSize()<<endl;
+    cout << "Input tensor shape: [ ";
+    for (int d : inputshape) cout << d << " ";
+    cout << "]" << endl;
+    int batch_size = inputshape[0];     
+    int channels   = inputshape[1];     // 1
+    int height     = inputshape[2];     // 28
+    int width      = inputshape[3];     // 28
 
-    int correct = 0;
-    int num_tests = 10; // test 10 samples
+    //output tensor definition
+    auto outputTensor = net->getSessionOutput(session, nullptr);
+    Tensor outputHost(outputTensor, outputTensor->getDimensionType());
 
-    for (int i = 0; i < num_tests; ++i) {
-        // Normalize image (0-1 range)
-        for (int j = 0; j < img_h * img_w; ++j) {
-            float pixel = images[i * img_h * img_w + j] / 255.0f;
-            pixel =  (pixel - 0.1307f)/0.3081f;
-            inputHost.host<float>()[j] = pixel;
-            
+
+    int total_correct = 0;
+    int total_samples =0;
+    double total_time =0;
+    double perimage_time = 0;
+    double total_pixels =0;
+    double total_images =0;
+
+    int num_tests = 5000/batch_size; // number of batches to run
+    int imagesize = height*width; 
+    for (int epoch = 0; epoch < num_tests; epoch++)
+    {
+    for (int b = 0; b < batch_size; ++b) {
+        int img_id = epoch * batch_size + b;
+        for (int j = 0; j < imagesize; ++j) {
+            float pixel = images[(img_id* imagesize) + j] / 255.0f;
+            pixel = (pixel - 0.1307f) / 0.3081f;
+            inputHost.host<float>()[b * imagesize + j] = pixel;
+            total_pixels++;
         }
+    }
 
         // Copy data to device (MNN handles NCHW→NC4HW4)
         inputTensor->copyFromHostTensor(&inputHost);
@@ -102,40 +130,74 @@ int main() {
         auto start = std::chrono::high_resolution_clock::now();
         net->runSession(session);
         auto end = std::chrono::high_resolution_clock::now();
-        double inference_time =
+        double inference_time_per_batch =
             std::chrono::duration<double, std::milli>(end - start).count();
 
-        // Get output
-        auto outputTensor = net->getSessionOutput(session, nullptr);
-        Tensor outputHost(outputTensor, outputTensor->getDimensionType());
+    // Get output
         outputTensor->copyToHostTensor(&outputHost);
 
-        // Find predicted label (argmax)
-        float max_val = -1e9f;
+    // Now interpret output as [32 x 10]
+    int batch_correct =0;
+    double batch_time = 0.00;
+
+    for (int b = 0; b < batch_size; ++b) {
+        float max_val = -1e9;
         int predicted = -1;
-        /*cout<<"The RAW values of the output";*/ 
-        for (int k = 0; k < outputHost.elementSize(); ++k) {
-            float val = outputHost.host<float>()[k];
-            /*cout<< val;*/
+
+        for (int k = 0; k < 10; ++k) {
+            float val = outputHost.host<float>()[b * 10 + k];
             if (val > max_val) {
                 max_val = val;
                 predicted = k;
             }
         }
 
-        int true_label = labels[i];
-        if (predicted == true_label) correct++;
+        int true_label = labels[epoch * batch_size + b];
+        /*cout << "Sample " << b
+            << " Predicted=" << predicted
+            << " True=" << true_label
+            << " maxval=" << max_val
+            << " interference time= "<< inference_time_per_batch<<"ms"
+            << "epoch number=" << epoch
+            << endl;*/
 
-        std::cout << "Sample " << i
-                  << ": Predicted=" << predicted
-                  << ", True=" << true_label
-                  << ", Time=" << inference_time << " ms"
-                  << std::endl;
+        if (predicted == true_label) batch_correct++;
+        batch_time += inference_time_per_batch;
+    }
+    auto batchaccuracy = (batch_correct * 100.0f / batch_size);
+    //cout << "Batch: " <<epoch<< " accuracy =" << batchaccuracy << "% " <<" Avg Interference time per image: "<<(batch_time/batch_size)<<"ms"<< endl;
+    total_correct += batch_correct;
+    //total_samples += batch_size;
+    total_time += inference_time_per_batch;
+    //perimage_time += (batch_time/batch_size);
+
     }
 
-    std::cout << "Accuracy on first " << num_tests << " samples: "
-              << (float)correct / num_tests * 100.0f << "%" << std::endl;
-        
+    total_images = total_pixels/imagesize;
+   /* cout<<"--------------------------------"<<endl;
+    cout <<"Model Accuracy for" << " batchsize = "<< batch <<" is "<<((total_correct*100.0f)/total_samples)<<"%"<<endl;
+    cout <<" Total interference time for the system is "<<total_time<<endl;
+    cout<<" Avg per image intereference time "<<(perimage_time/num_tests)<<" for "<<total_samples<<" images"<<endl;*/  
+    
+
+
+
+
+    // ------------------------
+    // Results
+    // ------------------------
+        std::cout << "\n==== BENCHMARK RESULTS ====\n";
+        std::cout << "Batch size              : " << batch_size << "\n";
+        std::cout << "Images processed        : " << total_images << "\n";
+        std::cout << "Avg batch inference time: "
+                  << (total_time / num_tests) << " ms\n";
+        std::cout << "Per-image latency       : "
+                  << total_time / total_images << " ms\n";
+        std::cout << "Accuracy                : "
+                  << (100.0 * total_correct / total_images) << " %\n";
 
     return 0;
-}
+
+    }
+
+

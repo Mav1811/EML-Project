@@ -44,7 +44,7 @@ def inference_local(args, runtime="pt"):
         pass
     elif runtime == "onnx":
         import onnxruntime
-        onnx_model_path = "mnist_cnn.onnx"
+        onnx_model_path = "mnist_cnn_b32.onnx"
         it = iter(test_loader)
         sample_input, _ = next(it)
         pt_2_onnx(model, sample_input, onnx_model_path)
@@ -201,14 +201,16 @@ if __name__ == '__main__':
     parser.add_argument('--model-path', type=str, default="mnist_cnn.pt", help='a pth to save a model')
     parser.add_argument('--device', type=str, default="RP_5", help='device to run inference on (default: RP_5)')
     parser.add_argument('--runtime', type=str, default="onnx", help='runtime engine (default: tflite)')
-    parser.add_argument('--model-precision', type=str, default="FP32", help='model precision (default: FP32)')
-    parser.add_argument('--data-precision', type=str, default="FP32", help='data precision (default: FP32)')
+    parser.add_argument('--model-precision', type=str, default="FP16", help='model precision (default: FP32)')
+    parser.add_argument('--data-precision', type=str, default="FP16", help='data precision (default: FP32)')
     args = parser.parse_args()
     
     if args.model_precision == "FP32":
         args.model_precision = np.float32
     elif args.model_precision == "INT8":
         args.model_precision = np.int8
+    elif args.model_precision == "FP16":
+        args.model_precision = np.float16
     else:
         msg = "Unsupported model precision"
         raise Exception(msg)
@@ -217,6 +219,8 @@ if __name__ == '__main__':
         args.data_precision = np.float32
     elif args.data_precision == "INT8":
         args.data_precision = np.uint8
+    elif args.data_precision == "FP16":
+        args.data_precision = np.float16
     else:
         msg = "Unsupported data precision"
         raise Exception(msg)

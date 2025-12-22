@@ -1,6 +1,6 @@
 CC = g++
 CFLAGS = -O3 -Wall -std=c++17
-TARGET = mnist_mnn
+TARGET = mnist_mnn_gpu
 OBJ = implement_mnn.cpp
 LIBRARY = /home/orangepi/MNN/build_opencl
 HEADS = /home/orangepi/MNN/include
